@@ -156,15 +156,17 @@ class VectorIndexService:
             vector_store_manager.delete_by_source(normalized_path)
 
             # 3. 使用新的文档分割器
+            logger.info(f"正在分割文档分片: {path.name}...")
             documents = document_splitter_service.split_document(content, normalized_path)
-            logger.info(f"文档分割完成: {file_path} -> {len(documents)} 个分片")
+            logger.info(f"文档分割完成: {path.name} -> {len(documents)} 个分片")
 
             # 4. 添加文档到向量存储
             if documents:
+                logger.info(f"正在将 {len(documents)} 个分片存入 Milvus...")
                 vector_store_manager.add_documents(documents)
-                logger.info(f"文件索引完成: {file_path}, 共 {len(documents)} 个分片")
+                logger.info(f"✓ 文件索引处理圆满完成: {path.name}")
             else:
-                logger.warning(f"文件内容为空或无法分割: {file_path}")
+                logger.warning(f"文件内容为空或无法分割: {path.name}")
 
         except Exception as e:
             logger.error(f"索引文件失败: {file_path}, 错误: {e}")

@@ -219,6 +219,18 @@ class MilvusClientManager:
             raise RuntimeError("Collection 未初始化，请先调用 connect()")
         return self._collection
 
+    def get_client(self) -> MilvusClient:
+        """
+        获取原生 MilvusClient 实例
+
+        Returns:
+            MilvusClient: Milvus 客户端实例
+        """
+        if self._client is None:
+            # 如果尚未连接，尝试连接
+            return self.connect()
+        return self._client
+
     def health_check(self) -> bool:
         """
         健康检查

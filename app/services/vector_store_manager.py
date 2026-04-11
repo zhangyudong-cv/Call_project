@@ -1,147 +1,142 @@
-"""向量存储管理器 - 封装 Milvus VectorStore 操作"""
+"""向量存储管理器 - 绕过 LangChain 封装，直接使用 pymilvus 原生驱动以确保稳定性"""
 
+import time
+import uuid
 from typing import List
 
 from langchain_core.documents import Document
-from langchain_milvus import Milvus
 from loguru import logger
 
-from app.config import config
+from app.core.milvus_client import milvus_manager
 from app.services.vector_embedding_service import vector_embedding_service
 
 
-# 统一使用 biz collection
-COLLECTION_NAME = "biz"
-
-
 class VectorStoreManager:
-    """向量存储管理器"""
+    """向量存储管理器 (原生驱动版)"""
 
     def __init__(self):
-        """初始化向量存储管理器"""
-        self.vector_store = None
-        self.collection_name = COLLECTION_NAME
-        self._initialize_vector_store()
-
-    def _initialize_vector_store(self):
-        """初始化 Milvus VectorStore"""
-        try:
-            connection_args = {
-                "host": config.milvus_host,
-                "port": config.milvus_port,
-            }
-
-            # 创建 LangChain Milvus VectorStore
-            # 使用 biz collection，字段映射：text_field -> content, vector_field -> vector
-            self.vector_store = Milvus(
-                embedding_function=vector_embedding_service,
-                collection_name=self.collection_name,
-                connection_args=connection_args,
-                auto_id=False,  # 使用自定义 id
-                drop_old=False,
-                text_field="content",  # 文本内容存储到 content 字段
-                vector_field="vector",  # 向量存储到 vector 字段
-                primary_field="id",  # 主键字段
-                metadata_field="metadata",  # 元数据字段
-            )
-
-            logger.info(
-                f"VectorStore 初始化成功: {config.milvus_host}:{config.milvus_port}, "
-                f"collection: {self.collection_name}"
-            )
-
-        except Exception as e:
-            logger.error(f"VectorStore 初始化失败: {e}")
-            raise
+        """初始化管理器"""
+        self.collection_name = "biz"
 
     def add_documents(self, documents: List[Document]) -> List[str]:
         """
-        批量添加文档到向量存储（自动批量向量化）
-
+        原生方法：添加文档到向量存储
+        
         Args:
             documents: 文档列表
-
+            
         Returns:
             List[str]: 文档 ID 列表
         """
         try:
-            import time
-            import uuid
+            if not documents:
+                return []
+                
             start_time = time.time()
+            logger.info(f"原生模式：正在准备存入 {len(documents)} 个文档片段到 Milvus...")
+
+            # 1. 提取内容并进行向量化
+            texts = [doc.page_content for doc in documents]
+            # 这里调用我们已经实现的 DashScope 服务获取向量
+            embeddings = vector_embedding_service.embed_documents(texts)
             
-            # 为每个文档生成唯一 id（因为 auto_id=False）
-            ids = [str(uuid.uuid4()) for _ in documents]
-            
-            # LangChain Milvus 的 add_documents 会自动调用 embedding_function
-            # 并进行批量处理，性能更好
-            result_ids = self.vector_store.add_documents(documents, ids=ids)
+            # 2. 准备插入数据
+            insert_data = []
+            ids = []
+            for i, (doc, vector) in enumerate(zip(documents, embeddings)):
+                doc_id = str(uuid.uuid4())
+                ids.append(doc_id)
+                
+                # 构造符合 Milvus Schema 的行数据
+                row = {
+                    "id": doc_id,
+                    "vector": vector,
+                    "content": doc.page_content,
+                    "metadata": doc.metadata
+                }
+                insert_data.append(row)
+
+            # 3. 使用原生客户端插入
+            client = milvus_manager.get_client()
+            res = client.insert(
+                collection_name=self.collection_name,
+                data=insert_data
+            )
             
             elapsed = time.time() - start_time
-            logger.info(
-                f"批量添加 {len(documents)} 个文档到 VectorStore 完成, "
-                f"耗时: {elapsed:.2f}秒, 平均: {elapsed/len(documents):.2f}秒/个"
-            )
-            return result_ids
+            logger.info(f"✓ 原生模式：存储完成，耗时: {elapsed:.2f}s, 插入 ID 数量: {len(ids)}")
+            return ids
+
         except Exception as e:
-            logger.error(f"添加文档失败: {e}")
+            logger.error(f"原生插入失败: {e}")
             raise
 
     def delete_by_source(self, file_path: str) -> int:
         """
-        删除指定文件的所有文档
-
-        Args:
-            file_path: 文件路径
-
-        Returns:
-            int: 删除的文档数量
+        原生方法：删除指定文件的所有文档
         """
         try:
-            # 使用 milvus_manager 获取已连接的 collection
-            from app.core.milvus_client import milvus_manager
-            collection = milvus_manager.get_collection()
+            client = milvus_manager.get_client()
             
-            # metadata 是 JSON 字段，使用 JSON 路径查询语法
-            # _source 是文档的来源文件路径
+            # 先检查集合是否为空
+            stats = client.get_collection_stats(collection_name=self.collection_name)
+            if stats.get("row_count", 0) == 0:
+                logger.info(f"向量库当前为空，跳过清理步骤: {file_path}")
+                return 0
+
+            # 原生表达式删除
             expr = f'metadata["_source"] == "{file_path}"'
+            logger.info(f"原生模式：正在清理旧数据: {expr}")
             
-            result = collection.delete(expr)
-            deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
-            
-            logger.info(f"删除文件旧数据: {file_path}, 删除数量: {deleted_count}")
-            return deleted_count
+            # 注意：MilvusClient 的 delete 接口稍有不同
+            res = client.delete(
+                collection_name=self.collection_name,
+                filter=expr
+            )
+            return len(res) if isinstance(res, list) else 0
             
         except Exception as e:
-            logger.warning(f"删除旧数据失败 (可能是首次索引): {e}")
+            logger.warning(f"原生删除操作警告 (可能无旧数据): {e}")
             return 0
-
-    def get_vector_store(self) -> Milvus:
-        """
-        获取 VectorStore 实例
-
-        Returns:
-            Milvus: VectorStore 实例
-        """
-        return self.vector_store
 
     def similarity_search(self, query: str, k: int = 3) -> List[Document]:
         """
-        相似度搜索
-
-        Args:
-            query: 查询文本
-            k: 返回结果数量
-
-        Returns:
-            List[Document]: 相关文档列表
+        原生方法：相似度搜索
         """
         try:
-            docs = self.vector_store.similarity_search(query, k=k)
-            logger.debug(f"相似度搜索完成: query='{query}', 结果数={len(docs)}")
+            # 1. 向量化查询词
+            query_vector = vector_embedding_service.embed_query(query)
+            
+            # 2. 调用原生搜索
+            client = milvus_manager.get_client()
+            search_res = client.search(
+                collection_name=self.collection_name,
+                data=[query_vector],
+                limit=k,
+                output_fields=["content", "metadata"]
+            )
+            
+            # 3. 转换为 LangChain Document 对象供后续 Agent 使用
+            docs = []
+            if search_res and len(search_res) > 0:
+                for hits in search_res:
+                    for hit in hits:
+                        # hit 是字典对象
+                        entity = hit.get("entity", {})
+                        doc = Document(
+                            page_content=entity.get("content", ""),
+                            metadata=entity.get("metadata", {})
+                        )
+                        docs.append(doc)
+            
             return docs
         except Exception as e:
-            logger.error(f"相似度搜索失败: {e}")
+            logger.error(f"原生搜索失败: {e}")
             return []
+
+    def get_vector_store(self):
+        """兼容性接口：返回自身"""
+        return self
 
 
 # 全局单例
