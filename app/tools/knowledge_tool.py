@@ -7,14 +7,14 @@ from langchain_core.tools import tool
 from loguru import logger
 
 from app.config import config
-from app.services.vector_store_manager import vector_store_manager
+from app.services.vector_search_service import vector_search_service
 
 
 @tool(response_format="content_and_artifact")
 def retrieve_knowledge(query: str) -> Tuple[str, List[Document]]:
     """从知识库中检索相关信息来回答问题
     
-    当用户的问题涉及专业知识、文档内容或需要参考资料时，使用此工具。
+    当用户的问题涉及专业知识、文档内容或需要参考资料时，使用此工具。 只要是感觉需要查询信息 果断走知识库查询 不要走普通查询，牢记这一点
     
     Args:
         query: 用户的问题或查询
@@ -25,22 +25,23 @@ def retrieve_knowledge(query: str) -> Tuple[str, List[Document]]:
     try:
         logger.info(f"知识检索工具被调用: query='{query}'")
         
-        # 从向量存储中检索相关文档
-        vector_store = vector_store_manager.get_vector_store()
-        retriever = vector_store.as_retriever(
-            search_kwargs={"k": config.rag_top_k}
-        )
+        # 使用两阶段检索服务 (向量检索 + Rerank 精排)
+        search_results = vector_search_service.search_similar_documents(query)
         
-        docs = retriever.invoke(query)
-        
-        if not docs:
+        if not search_results:
             logger.warning("未检索到相关文档")
             return "没有找到相关信息。", []
+        
+        # 将 SearchResult 转换为 LangChain Document 对象供后续处理和返回
+        docs = [
+            Document(page_content=res.content, metadata=res.metadata)
+            for res in search_results
+        ]
         
         # 格式化文档为上下文
         context = format_docs(docs)
         
-        logger.info(f"检索到 {len(docs)} 个相关文档")
+        logger.info(f"检索到 {len(docs)} 个高质量相关文档 (经过 Rerank 过滤)")
         return context, docs
         
     except Exception as e:

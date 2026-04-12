@@ -8,6 +8,7 @@ from loguru import logger
 
 from app.services.document_splitter_service import document_splitter_service
 from app.services.vector_store_manager import vector_store_manager
+from app.services.es_search_service import es_search_service  # ES BM25 多路写入
 
 
 class IndexingResult:
@@ -153,7 +154,9 @@ class VectorIndexService:
 
             # 2. 删除该文件的旧数据（如果存在）
             normalized_path = path.as_posix()
+            # 同时删除 Milvus 和 ES 中的旧分片，保证两边数据一致
             vector_store_manager.delete_by_source(normalized_path)
+            es_search_service.delete_by_source(normalized_path)  # 同步删除 ES 旧分片
 
             # 3. 使用新的文档分割器
             logger.info(f"正在分割文档分片: {path.name}...")
@@ -162,9 +165,16 @@ class VectorIndexService:
 
             # 4. 添加文档到向量存储
             if documents:
-                logger.info(f"正在将 {len(documents)} 个分片存入 Milvus...")
-                vector_store_manager.add_documents(documents)
-                logger.info(f"✓ 文件索引处理圆满完成: {path.name}")
+                logger.info(f"正在将 {len(documents)} 个分片存入 Milvus 和 ES...")
+
+                # 写入 Milvus，返回分配的 UUID 列表
+                doc_ids = vector_store_manager.add_documents(documents)
+
+                # 使用相同的 doc_ids 写入 ES，保证两个存储的 ID 一一对应
+                # 这样在 RRF 融合时才能通过 doc_id 正确去重
+                es_search_service.add_documents(documents, doc_ids)
+
+                logger.info(f"✓ 文件改进处理圆满完成: {path.name}")
             else:
                 logger.warning(f"文件内容为空或无法分割: {path.name}")
 
