@@ -433,3 +433,57 @@ def query_memory_metrics(
 if __name__ == "__main__":
     # 使用 streamable-http 模式，运行在 8004 端口
     mcp.run(transport="streamable-http", host="127.0.0.1", port=8004, path="/mcp")
+
+
+
+
+
+# {
+#   "service_name": "data-sync-service",
+#   "metric_name": "cpu_usage_percent",
+#   "interval": "1m",
+#   "data_points": [
+#     {"timestamp": "20:40", "value": 11.5, "process_id": "pid-12345"},
+#     {"timestamp": "20:41", "value": 10.8, "process_id": "pid-12345"},
+#     {"timestamp": "20:42", "value": 12.1, "process_id": "pid-12345"},
+#     {"timestamp": "20:43", "value": 24.5, "process_id": "pid-12345"}, 
+#     {"timestamp": "20:44", "value": 96.0, "process_id": "pid-12345"} // 异常高点
+#   ],
+#   "statistics": {
+#     "avg": 30.98,
+#     "max": 96.0,        // 🚨 标志1: 最大值接近 100%
+#     "min": 10.8,
+#     "p95": 96.0,
+#     "spike_detected": true // 🚨 标志2: 显式声明检测到突增
+#   },
+#   "alert_info": {
+#     "triggered": true,   // 🚨 标志3: 告警状态为“触发”
+#     "threshold": 80.0,
+#     "message": "CPU 使用率持续超过 80% 阈值" // 🚨 标志4: 错误描述
+#   }
+# }
+
+
+
+# {
+#   "service_name": "data-sync-service",
+#   "metric_name": "memory_usage_percent",
+#   "interval": "1m",
+#   "data_points": [
+#     {"timestamp": "20:40", "value": 31.2, "used_gb": 2.5, "total_gb": 8.0},
+#     {"timestamp": "20:41", "value": 45.6, "used_gb": 3.65, "total_gb": 8.0},
+#     {"timestamp": "20:42", "value": 85.0, "used_gb": 6.8, "total_gb": 8.0} 
+#   ],
+#   "statistics": {
+#     "avg": 53.93,
+#     "max": 85.0,           // 🚨 标志1: 内存占用高达 85%
+#     "min": 31.2,
+#     "p95": 85.0,
+#     "memory_pressure": true // 🚨 标志2: 显式声明存在内存压力
+#   },
+#   "alert_info": {
+#     "triggered": true,      // 🚨 标志3: 告警状态为“触发”
+#     "threshold": 70.0,
+#     "message": "内存使用率超过 70% 阈值，存在内存压力" // 🚨 标志4: 错误描述
+#   }
+# }

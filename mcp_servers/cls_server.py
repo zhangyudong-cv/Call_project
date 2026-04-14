@@ -468,3 +468,34 @@ def search_log(
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http", host="127.0.0.1", port=8003, path="/mcp")
+
+
+
+
+# {
+#   "topic_id": "topic-001",
+#   "start_time": 1713100000000,
+#   "end_time": 1713100300000,
+#   "query": null,
+#   "limit": 100,
+#   "total": 3,
+#   "logs": [
+#     {
+#       "timestamp": "2026-04-14 20:40:00",
+#       "level": "INFO", 
+#       "message": "正在同步元数据……"
+#     },
+#     {
+#       "timestamp": "2026-04-14 20:41:00",
+#       "level": "INFO",
+#       "message": "正在同步元数据……"
+#     },
+#     {
+#       "timestamp": "2026-04-14 20:42:00",
+#       "level": "INFO",
+#       "message": "正在同步元数据……"
+#     }
+#   ],
+#   "took_ms": 50,
+#   "message": "成功查询 3 条应用日志"
+# }
