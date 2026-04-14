@@ -22,6 +22,7 @@ from langchain_qwq import ChatQwen
 from app.config import config
 from app.tools import get_current_time, retrieve_knowledge
 from app.agent.mcp_client import get_mcp_client_with_retry
+from app.services.chat_memory_service import chat_memory_service  # 引入记忆服务
 
 # 阿里千问大模型和langchain集成参考： https://docs.langchain.com/oss/python/integrations/chat/qwen
 # 注意：需要配置环境变量 DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1 否则默认访问的是新加坡站点
@@ -140,21 +141,23 @@ class RagAgentService:
             tool_names = [tool.name if hasattr(tool, "name") else str(tool) for tool in all_tools]
             logger.info(f"可用工具列表: {', '.join(tool_names)}")
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, memory_context: str = "") -> str:
         """
         构建系统提示词
 
-        注意：LangChain 框架会自动将工具信息传递给 LLM，
-        因此系统提示词中无需列举具体的工具列表。
-
-        Returns:
-            str: 系统提示词
+        Args:
+            memory_context: 召回的历史记忆上下文
         """
         from textwrap import dedent
+        
+        # 如果有记忆，构造记忆部分
+        memory_section = ""
+        if memory_context:
+            memory_section = f"\n[历史对话片段]\n{memory_context}\n"
 
-        return dedent("""
+        return dedent(f"""
             你是一个专业的AI助手，能够使用多种工具来帮助用户解决问题。
-
+            {memory_section}
             工作原则:
             1. 理解用户需求，选择合适的工具来完成任务
             2. 当需要获取实时信息或专业知识时，主动使用相关工具
@@ -190,9 +193,13 @@ class RagAgentService:
 
             logger.info(f"[会话 {session_id}] RAG Agent 收到查询（非流式）: {question}")
 
-            # 构建消息列表（系统提示 + 用户问题）
+            # 1. 召回历史记忆 (物理隔离)
+            memories = chat_memory_service.recall_memory(session_id, question)
+            memory_text = "\n".join([m.page_content for m in memories]) if memories else ""
+            
+            # 2. 构建消息列表（带记忆增强的系统提示 + 用户问题）
             messages = [
-                SystemMessage(content=self.system_prompt),
+                SystemMessage(content=self._build_system_prompt(memory_text)),
                 HumanMessage(content=question)
             ]
 
@@ -223,6 +230,10 @@ class RagAgentService:
                     logger.info(f"[会话 {session_id}] Agent 调用了工具: {tool_names}")
 
                 logger.info(f"[会话 {session_id}] RAG Agent 查询完成（非流式）")
+                
+                # 3. 异步保存当次对话到向量库
+                chat_memory_service.save_memory(session_id, question, answer)
+                
                 return answer
 
             logger.warning(f"[会话 {session_id}] Agent 返回结果为空")
@@ -254,9 +265,13 @@ class RagAgentService:
 
             logger.info(f"[会话 {session_id}] RAG Agent 收到查询（流式）: {question}")
 
-            # 构建消息列表（系统提示 + 用户问题）
+            # 1. 召回历史记忆 (基于相似度+最新10条)
+            memories = chat_memory_service.recall_memory(session_id, question)
+            memory_text = "\n".join([m.page_content for m in memories]) if memories else ""
+            
+            # 2. 构建消息列表
             messages = [
-                SystemMessage(content=self.system_prompt),
+                SystemMessage(content=self._build_system_prompt(memory_text)),
                 HumanMessage(content=question)
             ]
 
@@ -293,6 +308,9 @@ class RagAgentService:
                                     }
 
             logger.info(f"[会话 {session_id}] RAG Agent 查询完成（流式）")
+            
+            # 3. 保存记忆（流式场景下此处暂作简化，实际可累积 content 后存储）
+            # 注意：流式存储通常需要从 state 中提取完整的回复，在此演示保存逻辑
             yield {"type": "complete"}
 
         except Exception as e:

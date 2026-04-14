@@ -174,3 +174,31 @@ class DocumentSplitterService:
 
 # 全局单例
 document_splitter_service = DocumentSplitterService()
+
+
+
+# 1. 针对 Markdown 的“三步走”策略 (split_markdown)
+# 针对 Markdown 格式，系统执行了非常严谨的语义保留逻辑：
+
+# 第一阶段：结构切分 (Header Splitting)
+# 使用 MarkdownHeaderTextSplitter 按一级标题 (#) 和二级标题 (##) 进行物理分割。
+# 关键点：它会将标题内容提取到元数据（Metadata）中。这样每一段文字都带上了“它属于哪个章节”的烙印。
+# 第二阶段：递归精细切分 (Recursive Splitting)
+# 如果某个章节的内容实在太长（超过了 chunk_size * 2），则调用 RecursiveCharacterTextSplitter。
+# 它会按照 \n\n（段落）、\n（行）、 （空格）的优先级顺序寻找切分点，尽量保证一句话不会被从中间切断。
+# 第三阶段：碎片合并 (_merge_small_chunks)
+# 核心亮点：防止“碎片化”。如果切分后出现了小于 300 字符 的极小片段，系统会尝试将其与前一个片段合并。
+# 目的：避免 Agent 搜到一个只有一两句话、毫无上下文的片段。
+# 2. 针对普通文本的逻辑 (split_text)
+# 逻辑相对简单直接：
+
+# 直接使用 RecursiveCharacterTextSplitter 进行切分。
+# 同样遵循段落 > 行 > 空格的优先级，保证文本块的语意相对完整。
+# 3. 关键参数设计
+# 在 __init__ 函数中，你可以看到几个精心设计的参数：
+
+# chunk_size：基础切分单位。
+# chunk_overlap：分片之间的重叠度。
+# 作用：每一段结尾都会带上下一段开头的少量文字。这能保证当关键信息刚好在切分点上时，Agent 能在两个片段里都能看到完整的意思。
+# secondary_chunk_size (加倍处理)：
+# 你会发现二次切分时使用的是 chunk_size * 2。这是为了给 Markdown 的层级保留更多的容忍度，减少分片数量，使搜索结果更聚合。

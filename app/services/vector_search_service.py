@@ -128,8 +128,8 @@ class VectorSearchService:
             fused_results = self._rrf_fusion(
                 vector_results,
                 es_results,
-                rrf_top=config.rrf_top,  # 融合后送入 Rerank 的最大候选数，来自配置文件
-                k=config.rrf_k,          # RRF 平滑常数，来自配置文件
+                rrf_top=config.rrf_top,
+                k=config.rrf_k,
             )
             logger.info(f"[阶段3] RRF 融合完成: {len(fused_results)} 个候选文档")
 
@@ -231,8 +231,8 @@ class VectorSearchService:
         self,
         vector_results: List[SearchResult],
         es_results: List[SearchResult],
-        rrf_top: int = config.rrf_top,  # 默认从配置文件读取
-        k: int = config.rrf_k,          # 默认从配置文件读取
+        rrf_top: int = config.rrf_top,
+        k: int = config.rrf_k,
     ) -> List[SearchResult]:
         """
         RRF（Reciprocal Rank Fusion）分数融合
@@ -262,8 +262,7 @@ class VectorSearchService:
             if doc_id not in doc_store:
                 doc_store[doc_id] = result
 
-        # 计算 ES BM25 路的 RRF 贡献
-        # ES 返回的结果已按 _score 降序，rank 与相关性正确对应
+        # 计算 ES BM25 路贡献
         for rank, result in enumerate(es_results, start=1):
             doc_id = result.id
             rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (k + rank)
