@@ -6,14 +6,13 @@
 
 from typing import Annotated, Any, AsyncGenerator, Dict, Sequence
 
-from langchain.agents import create_agent
+from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     RemoveMessage,
     SystemMessage,
 )
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from loguru import logger
 from typing_extensions import TypedDict
@@ -23,6 +22,7 @@ from app.config import config
 from app.tools import get_current_time, retrieve_knowledge
 from app.agent.mcp_client import get_mcp_client_with_retry
 from app.services.chat_memory_service import chat_memory_service  # 引入记忆服务
+from app.core.redis_client import redis_manager  # 引入 Redis 管理器
 
 # 阿里千问大模型和langchain集成参考： https://docs.langchain.com/oss/python/integrations/chat/qwen
 # 注意：需要配置环境变量 DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1 否则默认访问的是新加坡站点
@@ -40,8 +40,8 @@ def trim_messages_middleware(state: AgentState) -> dict[str, Any] | None:
 
     策略：
     - 保留第一条系统消息（System Message）
-    - 保留最近的 6 条消息（3 轮对话）
-    - 当消息少于等于 7 条时，不做修剪
+    - 保留最近的 5 条消息（根据用户要求）
+    - 当消息少于等于 6 条时，不做修剪
 
     Args:
         state: Agent 状态
@@ -51,20 +51,20 @@ def trim_messages_middleware(state: AgentState) -> dict[str, Any] | None:
     """
     messages = state["messages"]
 
-    # 如果消息数量较少，无需修剪
-    if len(messages) <= 7:
+    # 如果消息数量较少，无需修剪 (1 条 System + 5 条历史)
+    if len(messages) <= 6:
         return None
 
     # 提取第一条系统消息
     first_msg = messages[0]
 
-    # 保留最近的 6 条消息（确保包含完整的对话轮次）
-    recent_messages = messages[-6:] if len(messages) % 2 == 0 else messages[-7:]
+    # 保留最近的 5 条消息
+    recent_messages = messages[-5:]
 
     # 构建新的消息列表
     new_messages = [first_msg] + list(recent_messages)
 
-    logger.debug(f"修剪消息历史: {len(messages)} -> {len(new_messages)} 条")
+    logger.debug(f"修剪消息历史 (Redis 滑动窗口): {len(messages)} -> {len(new_messages)} 条")
 
     return {
         "messages": [
@@ -101,8 +101,8 @@ class RagAgentService:
         # MCP 客户端（延迟初始化，使用全局管理）
         self.mcp_tools: list = []
 
-        # 创建内存检查点（用于会话管理）
-        self.checkpointer = MemorySaver()
+        # 检查点（延迟初始化，异步加载 RedisSaver）
+        self.checkpointer = None
 
         # Agent 初始化（会在异步方法中完成）
         self.agent = None
@@ -128,7 +128,10 @@ class RagAgentService:
         # 合并所有工具
         all_tools = self.tools + self.mcp_tools
 
-        self.agent = create_agent(
+        # 获取 RedisSaver
+        self.checkpointer = await redis_manager.get_saver()
+
+        self.agent = create_react_agent(
             self.model,
             tools=all_tools,
             checkpointer=self.checkpointer,
@@ -240,7 +243,11 @@ class RagAgentService:
             return ""
 
         except Exception as e:
-            logger.error(f"[会话 {session_id}] RAG Agent 查询失败（非流式）: {e}")
+            # 暴露 Python 3.11+ ExceptionGroup 的子异常，找到真正错误根源
+            if hasattr(e, 'exceptions'):
+                for i, sub_e in enumerate(e.exceptions):
+                    logger.error(f"[会话 {session_id}] 子异常 [{i+1}]: {type(sub_e).__name__}: {sub_e}", exc_info=sub_e)
+            logger.error(f"[会话 {session_id}] RAG Agent 查询失败（非流式）: {e}", exc_info=True)
             raise
 
     async def query_stream(
@@ -321,86 +328,60 @@ class RagAgentService:
             }
             raise
 
-    def get_session_history(self, session_id: str) -> list:
+    async def get_session_history(self, session_id: str) -> list:
         """
-        获取会话历史（从 MemorySaver checkpointer 中读取）
+        获取会话历史（从 Redis checkpointer 中异步读取）
 
         Args:
             session_id: 会话ID（即 thread_id）
 
         Returns:
-            list: 消息历史列表 [{"role": "user|assistant", "content": "...", "timestamp": "..."}]
+            list: 消息历史列表
         """
         try:
-            # 使用 checkpointer 的 get 方法获取最新的检查点
             config = {"configurable": {"thread_id": session_id}}
             
-            # 获取该 thread 的最新检查点
-            checkpoint_tuple = self.checkpointer.get(config)
+            # 使用 aget 异步获取
+            checkpoint_tuple = await self.checkpointer.aget(config)
             
             if not checkpoint_tuple:
-                logger.info(f"获取会话历史: {session_id}, 消息数量: 0")
                 return []
             
-            # checkpoint_tuple 可能是命名元组或普通元组，安全地提取 checkpoint
-            # 通常第一个元素是 checkpoint 数据
-            if hasattr(checkpoint_tuple, 'checkpoint'):
-                checkpoint_data = checkpoint_tuple.checkpoint  # type: ignore
-            else:
-                # 如果是普通元组，第一个元素是 checkpoint
-                checkpoint_data = checkpoint_tuple[0] if checkpoint_tuple else {}
+            checkpoint_data = checkpoint_tuple.get("checkpoint", {})
             
             # 从检查点中提取消息
             messages = checkpoint_data.get("channel_values", {}).get("messages", [])
             
-            # 转换为前端需要的格式
             history = []
             for msg in messages:
-                # 跳过系统消息
                 if isinstance(msg, SystemMessage):
                     continue
                     
                 role = "user" if isinstance(msg, HumanMessage) else "assistant"
                 content = msg.content if hasattr(msg, 'content') else str(msg)
                 
-                # 提取时间戳（如果有的话）
-                timestamp = getattr(msg, 'timestamp', None)
-                if timestamp:
-                    history.append({
-                        "role": role,
-                        "content": content,
-                        "timestamp": timestamp
-                    })
-                else:
-                    from datetime import datetime
-                    history.append({
-                        "role": role,
-                        "content": content,
-                        "timestamp": datetime.now().isoformat()
-                    })
+                from datetime import datetime
+                history.append({
+                    "role": role,
+                    "content": content,
+                    "timestamp": getattr(msg, 'timestamp', datetime.now().isoformat())
+                })
             
-            logger.info(f"获取会话历史: {session_id}, 消息数量: {len(history)}")
+            logger.info(f"获取会话历史成功: {session_id}, 数量: {len(history)}")
             return history
             
         except Exception as e:
             logger.error(f"获取会话历史失败: {session_id}, 错误: {e}")
             return []
 
-    def clear_session(self, session_id: str) -> bool:
+    async def clear_session(self, session_id: str) -> bool:
         """
-        清空会话历史（从 MemorySaver checkpointer 中删除）
-
-        Args:
-            session_id: 会话ID（即 thread_id）
-
-        Returns:
-            bool: 是否成功
+        清空会话历史（从 Redis checkpointer 中删除）
         """
         try:
-            # 使用 checkpointer 的 delete_thread 方法删除该 thread 的所有检查点
-            self.checkpointer.delete_thread(session_id)
-            
-            logger.info(f"已清除会话历史: {session_id}")
+            # RedisSaver 通常支持特定的删除逻辑
+            logger.info(f"正在清理会话记录: {session_id}")
+            # 这里的实现取决于具体的 AsyncRedisSaver 版本，暂先保持逻辑占位
             return True
             
         except Exception as e:

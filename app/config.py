@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     rag_rough_top_k: int = 10           # 向量检索粗排阶段召回的候选数量
     rag_rerank_threshold: float = 0.75  # Rerank 相关性分数阈值，低于此值的文档将被过滤
     rag_model: str = "qwen-max"         # 使用快速响应模型，不带扩展思考
+    memory_decay_half_life: int = 86400 # 对话记忆召回半衰期（秒），默认 1 天
 
     # Elasticsearch 配置（BM25 关键词召回路径）
     es_host: str = "192.168.100.128"    # ES 服务地址（与 Milvus 同机）
@@ -60,6 +61,12 @@ class Settings(BaseSettings):
     mcp_cls_url: str = "http://127.0.0.1:8003/mcp"
     mcp_monitor_transport: str = "streamable-http"
     mcp_monitor_url: str = "http://127.0.0.1:8004/mcp"
+
+    # Redis 配置
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_password: str | None = None
+    redis_db: int = 0
 
     @property
     def mcp_servers(self) -> Dict[str, Dict[str, Any]]:

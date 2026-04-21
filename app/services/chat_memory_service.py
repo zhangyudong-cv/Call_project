@@ -1,5 +1,4 @@
-"""对话记忆服务模块 - 基于 Milvus 的长短期记忆增强"""
-
+import math
 import time
 import uuid
 from typing import List, Dict, Any
@@ -7,6 +6,7 @@ from typing import List, Dict, Any
 from loguru import logger
 from langchain_core.documents import Document
 
+from app.config import config
 from app.core.milvus_client import milvus_manager
 from app.services.vector_embedding_service import vector_embedding_service
 
@@ -60,73 +60,76 @@ class ChatMemoryService:
 
     def recall_memory(self, session_id: str, query: str, k: int = 5) -> List[Document]:
         """
-        混合召回策略：相似度检索 + 最近 10 条
+        记忆召回策略：基于 Milvus 的时间衰减向量检索
+        
+        计算公式 (L2 距离衰减): 
+        Adjusted_Distance = Raw_Distance * exp(lambda * delta_t)
+        其中 lambda = ln(2) / half_life
         
         Args:
             session_id: 会话 ID
             query: 当前查询文本
-            k: 每路提取的数量
+            k: 最终提取的数量
             
         Returns:
-            List[Document]: 召回的记忆片段列表
+            List[Document]: 召回的语义相关且考虑时间新鲜度的记忆片段
         """
         try:
             client = milvus_manager.get_client()
+            now = int(time.time())
             
-            # --- 路 1: 相似度召回 ---
+            # --- 1. 向量相似度初筛 (扩大候选池到 k*3) ---
             query_vector = vector_embedding_service.embed_query(query)
+            rough_k = k * 3
             search_res = client.search(
                 collection_name=self.collection_name,
                 data=[query_vector],
-                filter=f'session_id == "{session_id}"', # 强制隔离
-                limit=k,
+                filter=f'session_id == "{session_id}"', 
+                limit=rough_k,
                 output_fields=["content", "created_at"]
             )
             
-            sim_docs = []
+            # --- 2. 应用时间衰减重排 ---
+            # 计算衰减系数 lambda (ln 2 / half_life)
+            half_life = config.memory_decay_half_life
+            decay_lambda = math.log(2) / half_life if half_life > 0 else 0
+            
+            scored_candidates = []
             for hits in search_res:
                 for hit in hits:
                     entity = hit.get("entity", {})
-                    sim_docs.append(Document(
-                        page_content=entity.get("content", ""),
-                        metadata={"type": "sim_memory", "created_at": entity.get("created_at")}
-                    ))
+                    created_at = entity.get("created_at", 0)
+                    raw_distance = hit.get("distance", 0.0)
+                    
+                    # 时间差（秒）
+                    delta_t = max(0, now - created_at)
+                    
+                    # 衰减后的距离 (L2 距离越大越不相关，所以通过 exp 放大旧记录的距离)
+                    decay_factor = math.exp(decay_lambda * delta_t)
+                    adjusted_distance = raw_distance * decay_factor
+                    
+                    scored_candidates.append({
+                        "doc": Document(
+                            page_content=entity.get("content", ""),
+                            metadata={"type": "sim_memory", "created_at": created_at, "raw_dist": raw_distance}
+                        ),
+                        "adjusted_dist": adjusted_distance
+                    })
             
-            # --- 路 2: 最近 10 条召回 ---
-            recent_res = client.query(
-                collection_name=self.collection_name,
-                filter=f'session_id == "{session_id}"',
-                limit=10,
-                order_by="created_at",
-                descending=True,
-                output_fields=["content", "created_at"]
-            )
+            # 按调整后的距离升序排列 (由于 L2 距离越小越好)
+            scored_candidates.sort(key=lambda x: x["adjusted_dist"])
             
-            recent_docs = []
-            for item in recent_res:
-                recent_docs.append(Document(
-                    page_content=item.get("content", ""),
-                    metadata={"type": "recent_memory", "created_at": item.get("created_at")}
-                ))
+            # 截取前 k 个
+            final_candidates = [item["doc"] for item in scored_candidates[:k]]
             
-            # --- 合并去重 (基于创建时间或内容) ---
-            seen_content = set()
-            combined_docs = []
+            # --- 3. 最终按时间戳正序排列 (保证注入 Prompt 时的语序逻辑) ---
+            final_candidates.sort(key=lambda x: x.metadata.get("created_at", 0))
             
-            # 优先处理最近的消息，保证时序性
-            for doc in recent_docs + sim_docs:
-                if doc.page_content not in seen_content:
-                    combined_docs.append(doc)
-                    seen_content.add(doc.page_content)
-            
-            # 按时间戳正序排列（让 LLM 按照对话发生的先后顺序阅读）
-            combined_docs.sort(key=lambda x: x.metadata.get("created_at", 0))
-            
-            logger.info(f"[记忆召回] session_id={session_id}, 召回数量={len(combined_docs)}")
-            return combined_docs
+            logger.info(f"[衰减记忆召回] session_id={session_id}, 初始候选={len(scored_candidates)}, 最终召回={len(final_candidates)}")
+            return final_candidates
             
         except Exception as e:
-            logger.error(f"召回对话记忆失败: {e}")
+            logger.error(f"召回长期记忆失败: {e}")
             return []
 
 
