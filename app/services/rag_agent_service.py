@@ -135,6 +135,7 @@ class RagAgentService:
             self.model,
             tools=all_tools,
             checkpointer=self.checkpointer,
+            state_modifier=trim_messages_middleware,
         )
 
         self._agent_initialized = True
@@ -400,3 +401,35 @@ class RagAgentService:
 
 # 全局单例 - 启用流式输出
 rag_agent_service = RagAgentService(streaming=True)
+
+
+# 第一步：存储 (Storage) —— 记忆的家
+# 当对话开始时，每一条消息（User 说的话和 AI 的回答）都会被序列化成 JSON。
+
+# Redis Key: 通常格式为 checkpoint:{session_id}。
+# 内容: 存储的是整个对话的对象字典，包含消息列表、Token 统计等状态。
+# 第二步：加载 (Loading) —— 唤醒记忆
+# 当你再次发送消息时，query 方法会被调用：
+
+# 代码执行 self.agent.ainvoke(..., config={"configurable": {"thread_id": session_id}})。
+# LangGraph 看到 thread_id，立刻去 Redis 执行 GET 命令，把该会话的历史记录全部下载到内存中。
+# 第三步：触发 (Trigger) —— 哨兵检查
+# 在你刚刚挂载的 create_react_agent 内部，有一个“前置哨兵”（即 state_modifier）：
+
+# 在把记忆发给大模型（LLM）之前，系统会先跑一遍 trim_messages_middleware。
+# 此时的状态：内存里有一份完整的、从 Redis 取回的消息列表（比如已经有 10 条了）。
+# 第四步：修剪 (Trimming) —— 滑动窗口动作
+# 这是最关键的一步，发生在 trim_messages_middleware 内部：
+
+# 计数：计算消息总数（发现是 10 条）。
+# 提取：
+# 拿走第 0 条（System Prompt）。
+# 拿走最后 5 条（User最近的对话）。
+# 重构命令：构造一个特殊的指令：
+# RemoveMessage(id=REMOVE_ALL_MESSAGES)：告诉系统“清空当前内存和 Redis 里的所有旧消息”。
+# [first_msg, *recent_messages]：把筛选后的 6 条（1+5）放进去。
+# 第五步：写回 (Saving) —— 记忆同步
+# 当 AI 回答完你的问题后：
+
+# LangGraph 会合并新的消息，并调用 Redis 的 SET 命令。
+# 结果：Redis 里的旧的长记忆被覆盖，现在只剩下被修剪后的 6 条 + 刚刚生成的 1 条新对话。
